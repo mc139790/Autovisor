@@ -1,5 +1,6 @@
 import asyncio
-from playwright.async_api import Page
+import random
+from playwright.async_api import Page, Route
 from modules.configs import Config
 from modules.utils import get_video_attr
 from playwright._impl._errors import TargetClosedError
@@ -49,22 +50,50 @@ async def play_video(page: Page) -> None:
 
 async def skip_questions(page: Page, event_loop) -> None:
     await page.wait_for_load_state("domcontentloaded")
+    question_event = asyncio.Event()
+
+    answers = []
+    # 处理弹题时的网络请求
+    async def get_question_with_answer(route: Route):
+        nonlocal answers, question_event
+        if question_event.is_set():
+            pass # TODO: 处理错误
+            return
+        response = await route.fetch()
+        if response.status != 200:
+            pass # TODO: 处理错误响应
+            return
+        answers = []
+        data = await response.json()
+        for question in data["data"]["lessonTestQuestionUseInterfaceDtos"]:
+            question_answer = []
+            options = question["testQuestion"]["questionOptions"]
+            for option in options:
+                if int(option["result"]) == 1:
+                    question_answer.append(option["sort"])
+            answers.append(question_answer)
+        question_event.set()
+        await route.fulfill(response=response, json=data)
+    # 截获弹题的网络请求，获取答案
+    await page.route("**/gateway/t/v1/popupAnswer/lessonPopupExam", get_question_with_answer)
+
     while True:
         try:
-            await asyncio.sleep(0.7)
+            await question_event.wait()
             await page.wait_for_selector(".el-dialog", state="attached", timeout=1000)
+            await asyncio.sleep(random.random() + 0.5)
             total_ques = await page.query_selector_all(".number")
             if total_ques:
                 logger.write_log(f"检测到{len(total_ques)}道题目.\n")
-            for ques in total_ques:
+            for (i, ques) in enumerate(total_ques):
                 await ques.click(timeout=500)
                 if not await page.query_selector(".answer"):
                     choices = await page.query_selector_all(".topic-item")
-                    for each in choices[:2]:
-                        await each.click(timeout=500)
-                        await page.wait_for_timeout(100)
+                    for awnser in answers[i]:
+                        await choices[int(awnser) - 1].click(timeout=500)
             await page.press(".el-dialog", "Escape", timeout=1000)
             event_loop.set()
+            question_event.clear()
         except TargetClosedError:
             logger.write_log("浏览器已关闭,答题模块已下线.\n")
             return
